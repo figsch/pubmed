@@ -1,0 +1,176 @@
+require("RCurl")
+require("XML")
+require("plyr")
+require(ggplot2)
+
+
+# adapted from: https://github.com/rpsychologist
+# explore neurofinance research in pubmed from 2003 up to present
+
+#######################
+# Download PubMed XML #
+#######################
+
+# Search and fetch XML from PubMed
+searchPubmed <- function(query.term) {
+  # change spaces to + in query
+  query.gsub <- gsub(" ", "+", query.term)
+  # change single-quotes to URL-friendly %22
+  query.gsub <- gsub("'","%22", query.gsub)
+  # Perform search and save history, this will save PMIDS in history
+  pub.esearch <- getURL(paste("http://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=", 
+                              query.gsub, "&usehistory=y", sep = ""))
+  # Parse esearch XML
+  pub.esearch <- xmlTreeParse(pub.esearch, asText = TRUE)
+  # Count number of hits (super assign)
+  pub.count <<- as.numeric(xmlValue(pub.esearch[["doc"]][["eSearchResult"]][["Count"]]))
+  # Save WebEnv-string, it contains "links" to all articles in my search
+  pub.esearch <- xmlValue(pub.esearch[["doc"]][["eSearchResult"]][["WebEnv"]])
+  # Show how many articles that's being downloaded
+  cat("Searching (downloading", pub.count, "articles)\n")
+  
+  ## We need to batch download, since efetch will cap at 10k articles ##
+  # Start at 0
+  RetStart <- 0
+  # End at 10k
+  RetMax <- 10000
+  # Calculate how many iterations will be needed
+  Runs <- (pub.count %/% 10000) + 1
+  # Create empty object
+  pub.efetch <- list(NULL)
+  # Loop to batch download
+  for (i in 1:Runs) { 
+    # Download XML based on hits saved in pub.esearch (WebEnv)
+    tmp <- getURL(paste("http://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&WebEnv=",
+                      pub.esearch,"&query_key=1&retmode=xml&retstart=", RetStart, "&retmax=", RetMax, sep = ""))
+    pub.efetch[i] <- tmp
+    RetStart <- RetStart + 10000
+    RetMax <- RetMax + 10000
+  }
+
+  # Print that download is completed
+  cat("Completed download from PubMed.\n")
+  # Return XML
+  return(pub.efetch)
+}
+
+# Function to extract journal name from individual article
+extractJournal <- function(query.term = query) {
+  tmp <- lapply(1:length(pub.efetch), function(i) {
+    # Parse XML into XML Tree
+    xml.data <- xmlTreeParse(pub.efetch[[i]], useInternalNodes = TRUE)
+    # Use xpathSApply to extract Journal name
+    xpathSApply(xml.data, "//PubmedArticle/MedlineCitation/MedlineJournalInfo/MedlineTA", xmlValue)
+   })
+  journal <- unlist(tmp)
+  # Show how many journals that were extracted
+  cat("Extracted ", length(journal), " hits (",(length(journal)/pub.count)*100," %) from a total of ",
+      pub.count," hits. For query named: ", query.term,"\n", sep="")
+  # Create data frame with journal counts
+  journal <- data.frame(count(journal))
+  # Calculcate percent
+  journal$percent <- journal$freq / pub.count
+  # return data
+  return(journal)
+}
+
+# Function to extract affiliations from the article
+extractAffil <- function(query.term = query) {
+  tmp <- lapply(1:length(pub.efetch), function(i) {
+    # Parse XML into XML Tree
+    xml.data <- xmlTreeParse(pub.efetch[[i]], useInternalNodes = TRUE)
+    # Use xpathSApply to extract Affiliation
+    xpathSApply(xml.data, "//PubmedArticle/MedlineCitation/Article/AuthorList/Author/Affiliation", xmlValue)
+   })
+  affil <- unlist(tmp)
+  # Show how many affiliations that were extracted
+  cat("Extracted ", length(affil), " affiliations (",(length(affil)/pub.count)*100," %) from a total of ",
+      pub.count," articles. For query named: ", query.term,"\n", sep="")
+  # Create data frame with affiliation
+  affil <- data.frame(count(affil))
+  # Calculcate percent
+  affil$percent <- affil$freq / pub.count
+  # return data
+  return(affil)
+}
+
+###################
+# ACTUAL DOWNLOAD #
+###################
+
+# Get xml data for neuroeconomics OR neurofinance AND 2010[DP]
+query <- c("cbt" = "'neuroeconomics' OR 'neurofinance' AND 2010[DP]")
+pub.efetch <- searchPubmed(query)
+cbt_2010 <- extractJournal()
+
+# Get xml data for neuroeconomics OR neurofinance AND 2011[DP]
+query <- c("cbt" = "'neuroeconomics' OR 'neurofinance' AND 2011[DP]")
+pub.efetch <- searchPubmed(query)
+cbt_2011 <- extractJournal()
+
+# Get xml data for neuroeconomics OR neurofinance
+query <- c("cbt" = "'neuroeconomics' OR 'neurofinance'")
+pub.efetch <- searchPubmed(query)
+neurofinance <- pub.efetch
+neurofinancetxt = as.data.frame(do.call(rbind, neurofinance))
+write.table(neurofinancetxt,  "neurofinance.txt")
+cbt_any <- extractJournal()
+
+############################
+
+# Add year-column
+cbt_2010$year <- "2010"
+cbt_2011$year <- "2011"
+cbt_any$year <- "All"
+# Reorder by $freq
+cbt_any <- cbt_any[order(cbt_any$freq, decreasing=TRUE),]
+# keep top 20
+cbt_any <- cbt_any[1:20,]
+# Reorder factor levels, this will also drop levels not used
+cbt_any$x <- factor(cbt_any$x, levels=cbt_any$x)
+# Only keep values that's in Top 20 all time
+cbt_2010 <- cbt_2010[cbt_2010$x %in% cbt_any$x,]
+cbt_2011 <- cbt_2011[cbt_2011$x %in% cbt_any$x,]
+
+#compute FREQUENCY (all articles cited minus year-specific articles)
+
+cbt_years <- merge(cbt_2010,cbt_2011,by="x",all=TRUE)
+cbt_years$freqyrs <- apply(cbt_years[,c('freq.x', 'freq.y')],1, function(x) sum(x, na.rm=TRUE))
+cbt_yrs <- cbt_years[c(1,8)]
+
+cbtsansyears <- merge(cbt_any,cbt_yrs,by="x",all=TRUE)
+cbtsansyears[is.na(cbtsansyears)] <- 0
+cbtsansyears$minus <- cbtsansyears$freqyrs*(-1)
+cbtsansyears$freq <- apply(cbtsansyears[,c('freq', 'minus')],1, function(x) sum(x, na.rm=TRUE))
+cbtsansyears$minus <- cbtsansyears$freqyrs <- NULL
+
+# Combine data into one data frame
+cbt_total <- rbind(cbt_2010,cbt_2011,cbtsansyears)
+# Copy levels from cbt_any, but with levels in reverse order
+# since I want the highest value at the top
+cbt_total$x <- factor(cbt_total$x, levels=rev(cbt_any$x))
+
+
+###################
+# Ggplot2 code
+# Now that I have all my top 20 data in one object in the long format, the ggplot2 code is pretty simple.
+###################
+
+## Names for plot legend ##
+my_labels <- c("2010", "2011", "2003-2014")
+ 
+# Box plot
+ggplot(cbt_total, aes(x, freq, group=year, fill=year)) + geom_bar(stat="identity") + 
+  coord_flip() +
+  scale_fill_manual(values=c("All" = "#31a354", "2010" = "#f7fcb9", "2011" = "#addd8e"), labels=my_labels) +
+  xlab(NULL) +
+  theme(legend.position = "bottom")
+dev.copy2pdf(file="neurofinance2003-2014.pdf", height =11, width = 8)
+  
+# Line plot
+ggplot(cbt_total, aes(x, freq, group=year, color=year, linetype=year)) + geom_line(size=0.7) + 
+  coord_flip() +
+  scale_color_manual(values=c("All" = "#b41f5b", "2010" = "#A6CEE3", "2011" = "#1F78B4"), labels=my_labels) +
+  scale_linetype_manual(values=c("All" = "dashed", "2010" = "solid", "2011" = "solid"), labels=my_labels) +
+  xlab(NULL) +
+  theme(legend.position = "bottom")
